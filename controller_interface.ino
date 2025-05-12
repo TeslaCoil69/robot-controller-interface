@@ -46,7 +46,7 @@ void displayCompassDetails();
 // Stepper motor settings
 #define MAX_SPEED 1000.0  // Maximum speed in steps per second
 #define MAX_ACCEL 500.0   // Maximum acceleration in steps per second per second
-#define STEPS_PER_DEGREE 20  // Adjust based on your stepper motor and gearing
+#define STEPS_PER_DEGREE .5  // Adjust based on your stepper motor and gearing
 #define NORMAL_SPEED_MULTIPLIER 1.0    // Normal speed (100%)
 #define SLOW_SPEED_MULTIPLIER 0.25     // Slow speed (25%) when left bumper is pressed
 
@@ -238,6 +238,17 @@ void setupServos() {
 void loop() {
   // Check if we have received a complete string from Serial1
   if (stringComplete) {
+    // Check for safety commands regardless of format (redundant check)
+    if (inputString.indexOf("DISARM") >= 0) {
+      isArmed = false;
+      disarmMotors();
+      Serial.println("DISARM command detected in message!");
+    } else if (inputString.indexOf("STOP") >= 0) {
+      steeringServo.write(STEERING_CENTER);
+      driveServo.write(DRIVE_STOP);
+      Serial.println("STOP command detected in message!");
+    }
+    
     // Forward the received data to the computer
     Serial.println(inputString);
     
@@ -462,6 +473,22 @@ void serialEvent1() {
 }
 
 void parseControllerData(String data) {
+  // Check for special commands first
+  if (data.startsWith("DISARM")) {
+    // Emergency disarm command received
+    isArmed = false;
+    disarmMotors();
+    Serial.println("DISARM command received!");
+    return;
+  } else if (data.startsWith("STOP")) {
+    // Emergency stop without disarming - stop all movement but keep armed
+    steeringServo.write(STEERING_CENTER);
+    driveServo.write(DRIVE_STOP);
+    Serial.println("STOP command received!");
+    return;
+  }
+  
+  // Regular controller data
   // Split the string into values
   int values[18];  // Array to hold all values
   int valueIndex = 0;

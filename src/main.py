@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple
 import math
 import numpy as np
+from shapely.geometry import Point, Polygon
 
 @dataclass
 class Waypoint:
@@ -88,6 +89,17 @@ class GPSData:
         self.autopilot_steering_angle = 0
         self.autopilot_throttle = 0
         self.autopilot_speed_limit = 70  # % of max throttle
+        # Add geofencing data
+        self.geofence_active = False
+        self.geofence_points = []  # List of (lat, lon) tuples defining the fence boundary
+        self.geofence_polygon = None  # Shapely polygon for containment checks
+        self.geofence_name = "Default Fence"
+        self.geofence_violation = False
+        self.last_geofence_check = None
+        self.inside_geofence = True  # Assume inside until first check
+        self.geofence_file = 'geofences.json'
+        self.available_geofences = {}  # name -> points mapping
+        self.load_geofences()  # Load saved geofences
 
     def update(self, lat, lon, alt, speed, sats, hdop):
         self.latitude = lat
@@ -109,6 +121,15 @@ class GPSData:
             self.home_set = True
         # Check for waypoint completion
         self.check_waypoint_completion(lat, lon)
+        
+        # Check geofence compliance if active
+        if self.geofence_active and self.geofence_polygon:
+            inside = self.check_geofence(lat, lon)
+            # If we detect a violation, notify immediately
+            if not inside and not self.inside_geofence:  # Just crossed outside
+                self.geofence_violation = True
+                print(f"GEOFENCE VIOLATION at position {lat:.6f}, {lon:.6f}!")
+                # The actual disarm and stop commands are handled in the controller's _send_serial_data method
 
     def no_fix(self):
         self.has_fix = False
@@ -335,6 +356,89 @@ class GPSData:
         
         return steering_angle
 
+    def load_geofences(self):
+        """Load saved geofences from file."""
+        try:
+            if os.path.exists(self.geofence_file):
+                with open(self.geofence_file, 'r') as f:
+                    self.available_geofences = json.load(f)
+        except Exception as e:
+            print(f"Error loading geofences: {e}")
+            self.available_geofences = {}
+    
+    def save_geofences(self):
+        """Save current geofences to file."""
+        try:
+            with open(self.geofence_file, 'w') as f:
+                json.dump(self.available_geofences, f)
+        except Exception as e:
+            print(f"Error saving geofences: {e}")
+    
+    def set_geofence(self, points, name="Default Fence"):
+        """Set geofence from a list of (lat, lon) points."""
+        if len(points) < 3:
+            return False  # Need at least 3 points for a polygon
+        
+        self.geofence_points = points
+        self.geofence_name = name
+        
+        # Create shapely polygon for containment checks
+        if points:
+            self.geofence_polygon = Polygon(points)
+            # Save to available geofences
+            self.available_geofences[name] = points
+            self.save_geofences()
+            return True
+        return False
+    
+    def activate_geofence(self, name=None):
+        """Activate geofence by name or current geofence."""
+        if name and name in self.available_geofences:
+            self.set_geofence(self.available_geofences[name], name)
+        
+        if self.geofence_polygon:
+            self.geofence_active = True
+            self.geofence_violation = False
+            self.inside_geofence = True  # Reset state
+            return True
+        return False
+    
+    def deactivate_geofence(self):
+        """Deactivate geofence."""
+        self.geofence_active = False
+        self.geofence_violation = False
+        return True
+    
+    def delete_geofence(self, name):
+        """Delete a saved geofence."""
+        if name in self.available_geofences:
+            del self.available_geofences[name]
+            self.save_geofences()
+            # If current geofence was deleted, reset it
+            if name == self.geofence_name:
+                self.geofence_points = []
+                self.geofence_polygon = None
+                self.geofence_active = False
+            return True
+        return False
+    
+    def check_geofence(self, lat, lon):
+        """Check if position is inside the geofence."""
+        if not self.geofence_active or not self.geofence_polygon:
+            return True  # No geofence active, so considered "inside"
+        
+        position = Point(lon, lat)  # Note: Shapely uses (x, y) = (lon, lat)
+        inside = self.geofence_polygon.contains(position)
+        self.inside_geofence = inside
+        self.last_geofence_check = datetime.now()
+        
+        # Check for violation (if was inside and now outside)
+        if not inside and not self.geofence_violation:
+            self.geofence_violation = True
+            return False
+        
+        return inside
+
 class SerialConnection:
     def __init__(self):
         self.serial = None
@@ -496,14 +600,35 @@ class SerialConnection:
                     opacity=0.8
                 ).add_to(m)
 
-        # Add click handler for waypoints
+        # Add geofence visualization if active or being drawn
+        if self.gps_data.geofence_active and self.gps_data.geofence_points:
+            # Draw geofence polygon
+            folium.Polygon(
+                locations=self.gps_data.geofence_points,
+                color='red' if self.gps_data.geofence_violation else 'green',
+                weight=3,
+                fill=True,
+                fill_opacity=0.1,
+                popup=f'Geofence: {self.gps_data.geofence_name}'
+            ).add_to(m)
+        
+        # Draw click handler for waypoints or geofence
         m.get_root().html.add_child(folium.Element("""
             <script>
-                var map = document.querySelector('#map');
-                map.addEventListener('click', function(e) {
-                    var lat = e.latlng.lat;
-                    var lng = e.latlng.lng;
-                    window.pywebview.api.on_map_click(lat, lng);
+                document.addEventListener('DOMContentLoaded', function() {
+                    var map = document.querySelector('.leaflet-map-pane');
+                    if (map) {
+                        map.parentElement.addEventListener('click', function(e) {
+                            if (e.target && e.target.classList.contains('leaflet-container')) {
+                                var rect = e.target.getBoundingClientRect();
+                                var x = e.clientX - rect.left;
+                                var y = e.clientY - rect.top;
+                                var point = L.point(x, y);
+                                var latLng = e.target._leaflet_map.containerPointToLatLng(point);
+                                window.sendEvent('map_click', {lat: latLng.lat, lng: latLng.lng});
+                            }
+                        });
+                    }
                 });
             </script>
         """))
@@ -512,6 +637,32 @@ class SerialConnection:
         m.save(self.map_file)
         with open(self.map_file, 'r') as f:
             self.map_html = f.read()
+
+    def send_disarm_command(self):
+        """Send a disarm command to the robot."""
+        if not self.connected or not self.serial or not self.serial.is_open:
+            return
+        
+        try:
+            # Create a special disarm message
+            disarm_data = "DISARM\n"
+            self.serial.write(disarm_data.encode())
+            print("Geofence violation! Sent disarm command.")
+        except Exception as e:
+            print(f"Error sending disarm command: {e}")
+            
+    def send_stop_command(self):
+        """Send a stop command to the robot (emergency stop without disarming)."""
+        if not self.connected or not self.serial or not self.serial.is_open:
+            return
+        
+        try:
+            # Create a special stop message
+            stop_data = "STOP\n"
+            self.serial.write(stop_data.encode())
+            print("Sent emergency stop command.")
+        except Exception as e:
+            print(f"Error sending stop command: {e}")
 
 class ControllerMonitor:
     def __init__(self):
@@ -614,9 +765,34 @@ class ControllerMonitor:
         if not self.serial.connected:
             return
 
+        # Check for geofence violation first
+        gps = self.serial.gps_data
+        if gps and gps.geofence_active and gps.geofence_violation:
+            # If there's a geofence violation, send disarm command
+            self.serial.send_disarm_command()
+            
+            # Also send stop command as a backup in case disarm fails
+            self.serial.send_stop_command()
+            
+            # Also send neutral commands to ensure no movement
+            data = [
+                0, 0,          # Left stick X & Y (camera gimbal) - set to neutral
+                0, 0,          # Right stick X & Y (steering, throttle) - set to neutral/stop
+                0, 0,          # Left & right triggers - neutral
+                0, 0, 0, 0,    # A, B, X, Y buttons - off
+                0, 0,          # Left & right bumpers - off
+                0, 0,          # Select & start buttons - off
+                0, 0, 0, 0     # D-pad - off
+            ]
+            
+            # Convert to comma-separated string and add newline
+            data_str = ','.join(map(str, data)) + '\n'
+            self.serial.write(data_str)
+            self.last_message = data_str.strip()  # Store last message without newline
+            return
+
         # Format: LX,LY,RX,RY,LT,RT,A,B,X,Y,LB,RB,SELECT,START,DPAD_UP,DPAD_DOWN,DPAD_LEFT,DPAD_RIGHT
         # Check if autopilot should override controls
-        gps = self.serial.gps_data
         if gps and gps.autopilot_active and not self.autopilot_override:
             # Override right stick X (steering) and right stick Y (throttle)
             # Left stick (camera gimbal) remains user controlled
@@ -961,6 +1137,56 @@ with ui.card().classes('w-full q-pa-lg bg-grey-1'):
                             ui.label('Speed Limit:').classes('text-caption q-ml-md')
                             speed_limit = ui.slider(min=0, max=100, value=70, on_change=lambda e: set_autopilot_speed(e.value)).classes('w-32')
                             speed_display = ui.label('70%').classes('text-caption w-14')
+
+        # Geofencing Section
+        with ui.card().classes('col-span-12 bg-white q-mb-lg'):
+            with ui.card().classes('q-pa-lg'):
+                with ui.row().classes('items-center justify-between q-mb-md'):
+                    with ui.row().classes('items-center gap-2'):
+                        ui.icon('fence').classes('text-primary text-h4')
+                        ui.label('Geofencing').classes('text-h4 text-weight-bold text-primary')
+                    geofence_status = ui.label('Geofence: Inactive').classes('text-h6 text-negative q-pa-sm rounded')
+                
+                with ui.row().classes('q-mb-md gap-4'):
+                    geofence_toggle = ui.switch('Enable Geofence', on_change=lambda e: toggle_geofence(e.value))
+                    ui.button('Draw on Map', icon='edit', on_click=lambda: start_geofence_drawing()).classes('bg-primary text-white')
+                    ui.button('Clear Geofence', icon='delete', on_click=lambda: clear_geofence()).classes('bg-negative text-white')
+                
+                # Geofence management
+                with ui.card().classes('col-span-12 bg-grey-1 q-pa-md'):
+                    with ui.row().classes('items-center justify-between q-mb-sm'):
+                        ui.label('Geofence Settings').classes('text-subtitle1 text-weight-medium')
+                    
+                    with ui.row().classes('items-center gap-2 q-mb-md'):
+                        ui.label('Current Fence:').classes('text-caption')
+                        current_fence_name = ui.label('None').classes('font-mono text-subtitle1')
+                        
+                    with ui.row().classes('items-center gap-2 q-mb-md'):
+                        ui.label('Save Current Fence:').classes('text-caption')
+                        fence_name_input = ui.input(placeholder='Fence name').classes('w-48')
+                        ui.button('Save', icon='save', on_click=lambda: save_current_geofence()).classes('bg-positive text-white')
+                    
+                    with ui.row().classes('items-center gap-2'):
+                        ui.label('Load Fence:').classes('text-caption')
+                        fence_selector = ui.select(
+                            options=[],
+                            value=None,
+                            on_change=lambda e: load_geofence(e.value) if e.value else None
+                        ).classes('w-48')
+                        ui.button('Delete', icon='delete', on_click=lambda: delete_selected_geofence()).classes('bg-negative text-white')
+                    
+                    with ui.row().classes('items-center gap-2 q-mt-md'):
+                        ui.label('Status:').classes('text-caption')
+                        fence_position_status = ui.label('Unknown').classes('font-mono text-subtitle1')
+                    
+                    # Hidden dialog for geofence drawing instructions
+                    geofence_dialog = ui.dialog()
+                    with geofence_dialog, ui.card().classes('w-96'):
+                        ui.label('Draw Geofence').classes('text-h6 q-mb-md')
+                        ui.label('Click on the map to add points to your geofence. Add at least 3 points to create a valid boundary. Click "Done" when finished.').classes('q-mb-md')
+                        with ui.row().classes('w-full justify-end gap-2'):
+                            ui.button('Cancel', on_click=geofence_dialog.close).classes('bg-grey-2')
+                            ui.button('Done', on_click=lambda: finish_geofence_drawing()).classes('bg-primary text-white')
 
         # Left column - Analog inputs with visual indicators
         with ui.card().classes('col-span-4 bg-white'):
@@ -1419,6 +1645,277 @@ def update_autopilot():
 
 # Add autopilot update timer
 ui.timer(0.2, update_autopilot)  # Update autopilot calculations 5 times per second
+
+# Add functions for geofence management
+drawing_geofence = False
+temp_geofence_points = []
+temp_geofence_markers = []
+
+def toggle_geofence(value):
+    """Toggle geofence active state."""
+    gps = controller.serial.gps_data
+    if value:
+        # Try to activate current geofence
+        if gps.activate_geofence():
+            geofence_status.set_text('Geofence: Active')
+            geofence_status.classes('text-h6 text-positive q-pa-sm rounded')
+            ui.notify('Geofence activated', type='positive')
+            update_geofence_display()
+        else:
+            geofence_toggle.set_value(False)
+            ui.notify('No valid geofence defined', type='warning')
+    else:
+        gps.deactivate_geofence()
+        geofence_status.set_text('Geofence: Inactive')
+        geofence_status.classes('text-h6 text-negative q-pa-sm rounded')
+        ui.notify('Geofence deactivated', type='warning')
+        fence_position_status.set_text('Unknown')
+
+def start_geofence_drawing():
+    """Start drawing geofence on the map."""
+    global drawing_geofence, temp_geofence_points, temp_geofence_markers
+    
+    gps = controller.serial.gps_data
+    if not gps.has_fix:
+        ui.notify('Need GPS fix to draw geofence', type='warning')
+        return
+    
+    # Reset temporary storage
+    drawing_geofence = True
+    temp_geofence_points = []
+    temp_geofence_markers = []
+    
+    # Show instructions
+    geofence_dialog.open()
+    
+    # Update map to show we're in drawing mode
+    controller.serial.update_map()
+    
+    ui.notify('Click on map to add geofence points', type='info', timeout=5000)
+
+def handle_map_click(e):
+    """Handle map click events for waypoints or geofence drawing."""
+    # Check if we're in geofence drawing mode
+    global drawing_geofence, temp_geofence_points, temp_geofence_markers
+    
+    if drawing_geofence:
+        try:
+            # Extract coordinates from the click event
+            lat = float(e.args.get('lat', 0))
+            lon = float(e.args.get('lng', 0))
+            
+            # Validate coordinates
+            if not (-90 <= lat <= 90) or not (-180 <= lon <= 180):
+                ui.notify('Invalid coordinates received', type='negative')
+                return
+            
+            # Add point to temporary geofence
+            temp_geofence_points.append((lat, lon))
+            
+            # Update map to show the point
+            controller.serial.update_map()
+            
+            ui.notify(f'Added point {len(temp_geofence_points)}: {lat:.6f}, {lon:.6f}', type='info')
+            
+        except (ValueError, TypeError, AttributeError) as e:
+            print(f"Error handling map click for geofence: {e}")
+            ui.notify('Error adding geofence point', type='negative')
+    else:
+        # Regular waypoint handling
+        if not controller.serial.gps_data or not controller.serial.gps_data.has_fix:
+            ui.notify('No GPS signal available. Please wait for GPS fix.', type='warning')
+            return
+
+        try:
+            # Extract coordinates from the click event
+            lat = float(e.args.get('lat', 0))
+            lon = float(e.args.get('lng', 0))
+            
+            # Validate coordinates
+            if not (-90 <= lat <= 90) or not (-180 <= lon <= 180):
+                ui.notify('Invalid coordinates received', type='negative')
+                return
+
+            # Create waypoint dialog
+            dialog = ui.dialog()
+            with dialog, ui.card().classes('w-96'):
+                ui.label('Add Waypoint').classes('text-h6 q-mb-md')
+                description = ui.input('Description (optional)').classes('w-full')
+                with ui.row().classes('w-full justify-end gap-2'):
+                    ui.button('Cancel', on_click=dialog.close).classes('bg-grey-2')
+                    ui.button('Add', on_click=lambda: add_waypoint(lat, lon, description.value, dialog)).classes('bg-primary text-white')
+        except (ValueError, TypeError, AttributeError) as e:
+            print(f"Error handling map click: {e}")
+            ui.notify('Error processing map click', type='negative')
+
+def finish_geofence_drawing():
+    """Finish drawing geofence on the map."""
+    global drawing_geofence, temp_geofence_points
+    
+    geofence_dialog.close()
+    
+    if len(temp_geofence_points) < 3:
+        ui.notify('Need at least 3 points for a valid geofence', type='warning')
+        drawing_geofence = False
+        temp_geofence_points = []
+        controller.serial.update_map()
+        return
+    
+    # Close the polygon by connecting back to the first point
+    if temp_geofence_points[0] != temp_geofence_points[-1]:
+        temp_geofence_points.append(temp_geofence_points[0])
+    
+    # Set the geofence
+    gps = controller.serial.gps_data
+    if gps.set_geofence(temp_geofence_points):
+        ui.notify('Geofence created successfully', type='positive')
+        current_fence_name.set_text(gps.geofence_name)
+        
+        # Update fence selector
+        update_fence_selector()
+    else:
+        ui.notify('Failed to create geofence', type='negative')
+    
+    # Exit drawing mode
+    drawing_geofence = False
+    temp_geofence_points = []
+    
+    # Update map to show the new geofence
+    controller.serial.update_map()
+
+def clear_geofence():
+    """Clear the current geofence."""
+    gps = controller.serial.gps_data
+    gps.geofence_points = []
+    gps.geofence_polygon = None
+    gps.geofence_active = False
+    geofence_toggle.set_value(False)
+    geofence_status.set_text('Geofence: Inactive')
+    geofence_status.classes('text-h6 text-negative q-pa-sm rounded')
+    current_fence_name.set_text('None')
+    ui.notify('Geofence cleared', type='info')
+    
+    # Update map to remove geofence
+    controller.serial.update_map()
+
+def save_current_geofence():
+    """Save the current geofence with a name."""
+    gps = controller.serial.gps_data
+    name = fence_name_input.value
+    
+    if not name:
+        ui.notify('Please enter a name for the geofence', type='warning')
+        return
+    
+    if not gps.geofence_points or len(gps.geofence_points) < 3:
+        ui.notify('No valid geofence to save', type='warning')
+        return
+    
+    # Save with new name
+    gps.set_geofence(gps.geofence_points, name)
+    current_fence_name.set_text(name)
+    fence_name_input.set_value('')
+    
+    # Update fence selector
+    update_fence_selector()
+    
+    ui.notify(f'Geofence "{name}" saved', type='positive')
+
+def load_geofence(name):
+    """Load a saved geofence."""
+    if not name:
+        return
+    
+    gps = controller.serial.gps_data
+    if name in gps.available_geofences:
+        points = gps.available_geofences[name]
+        if gps.set_geofence(points, name):
+            current_fence_name.set_text(name)
+            ui.notify(f'Geofence "{name}" loaded', type='positive')
+            
+            # Update map to show the geofence
+            controller.serial.update_map()
+            
+            # If geofence was active, update status with new geofence
+            if gps.geofence_active:
+                gps.activate_geofence()
+                update_geofence_display()
+        else:
+            ui.notify(f'Failed to load geofence "{name}"', type='negative')
+
+def delete_selected_geofence():
+    """Delete the selected geofence."""
+    name = fence_selector.value
+    if not name:
+        ui.notify('No geofence selected', type='warning')
+        return
+    
+    gps = controller.serial.gps_data
+    if gps.delete_geofence(name):
+        ui.notify(f'Geofence "{name}" deleted', type='info')
+        
+        # If this was the current fence, update display
+        if name == gps.geofence_name:
+            current_fence_name.set_text('None')
+            geofence_toggle.set_value(False)
+            geofence_status.set_text('Geofence: Inactive')
+            geofence_status.classes('text-h6 text-negative q-pa-sm rounded')
+        
+        # Update fence selector
+        update_fence_selector()
+        fence_selector.set_value(None)
+        
+        # Update map
+        controller.serial.update_map()
+    else:
+        ui.notify(f'Failed to delete geofence "{name}"', type='negative')
+
+def update_fence_selector():
+    """Update the fence selector with available geofences."""
+    gps = controller.serial.gps_data
+    fence_selector.options = [{'label': name, 'value': name} for name in gps.available_geofences.keys()]
+
+def update_geofence_display():
+    """Update geofence status display."""
+    gps = controller.serial.gps_data
+    if gps.geofence_active:
+        if gps.inside_geofence:
+            fence_position_status.set_text('Inside Fence')
+            fence_position_status.classes('font-mono text-subtitle1 text-positive')
+        else:
+            fence_position_status.set_text('OUTSIDE FENCE!')
+            fence_position_status.classes('font-mono text-subtitle1 text-negative font-weight-bold')
+            
+            # Show alert for geofence violation with detailed safety information
+            if gps.geofence_violation:
+                ui.notify(
+                    'GEOFENCE VIOLATION! Multiple safety measures activated:\n'
+                    '1. Robot disarmed\n'
+                    '2. Emergency stop signal sent\n'
+                    '3. All movement commands blocked',
+                    type='negative',
+                    timeout=0,  # Don't auto-close
+                    position='center',  # Center of screen
+                    classes='text-h6'  # Larger text
+                )
+    else:
+        fence_position_status.set_text('Unknown')
+        fence_position_status.classes('font-mono text-subtitle1')
+
+# Load geofences on startup
+def initialize_geofence_ui():
+    """Initialize geofence UI with saved geofences."""
+    update_fence_selector()
+    
+    # Check if there's an active geofence to display
+    gps = controller.serial.gps_data
+    if gps.geofence_name != "Default Fence" and gps.geofence_points:
+        current_fence_name.set_text(gps.geofence_name)
+    else:
+        current_fence_name.set_text('None')
+
+# Call initialization after UI is built
+initialize_geofence_ui()
 
 if __name__ in {"__main__", "__mp_main__"}:
     ui.run()
