@@ -9,7 +9,7 @@ A Python-based interface for controlling a robot with GPS navigation capabilitie
 - Interactive map display with click-to-add waypoints
 - Route tracking and waypoint management
 - Return to Home functionality
-- Compass heading with BNO085 sensor
+- Compass heading with BNO055 sensor
 - Serial communication with Arduino controller
 - Support for multiple input devices
 
@@ -27,7 +27,8 @@ A Python-based interface for controlling a robot with GPS navigation capabilitie
 - Servo
 - Wire
 - Adafruit_ADXL345_U
-- Adafruit_BNO08x
+- Adafruit_BNO055
+- Adafruit_Sensor
 - TinyGPS++
 
 ## Installation
@@ -71,11 +72,12 @@ The Return to Home feature allows your robot to automatically navigate back to i
 - **Requirements**: Requires a valid GPS fix on startup to set the home position
 
 ### Compass Navigation
-The BNO085 compass sensor provides accurate heading information for navigation:
+The BNO055 compass sensor provides accurate heading information for navigation:
 
 - **Heading**: Displays the current direction in degrees (0-360°)
 - **Pitch and Roll**: Shows the orientation of the vehicle in 3D space
-- **Automatic Calibration**: The BNO085 features auto-calibration for reliable readings
+- **Auto-Calibration**: The BNO055 features self-calibration capabilities
+- **Calibration Status**: Visual indicators display calibration levels for system, gyroscope, accelerometer, and magnetometer
 - **Integration**: Compass data is available simultaneously with GPS data, even without GPS signal
 - **Real-time Updates**: Heading updates twice per second for responsive navigation
 

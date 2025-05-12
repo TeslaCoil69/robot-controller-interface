@@ -71,6 +71,11 @@ class GPSData:
         self.compass_roll = None
         self.compass_ready = False
         self.compass_last_update = None
+        # Add calibration status for BNO055
+        self.compass_system_cal = 0
+        self.compass_gyro_cal = 0
+        self.compass_accel_cal = 0
+        self.compass_mag_cal = 0
 
     def update(self, lat, lon, alt, speed, sats, hdop):
         self.latitude = lat
@@ -254,11 +259,15 @@ class SerialConnection:
                 elif line.startswith('COMPASS,'):
                     # Handle compass data
                     parts = line.split(',')
-                    if len(parts) == 4 and parts[1] != 'NOT_READY':
+                    if len(parts) == 8 and parts[1] != 'NOT_READY':  # Updated for BNO055 with calibration data
                         try:
                             self.gps_data.compass_heading = float(parts[1])
                             self.gps_data.compass_pitch = float(parts[2])
                             self.gps_data.compass_roll = float(parts[3])
+                            self.gps_data.compass_system_cal = int(parts[4])
+                            self.gps_data.compass_gyro_cal = int(parts[5])
+                            self.gps_data.compass_accel_cal = int(parts[6])
+                            self.gps_data.compass_mag_cal = int(parts[7])
                             self.gps_data.compass_ready = True
                             self.gps_data.compass_last_update = datetime.now()
                             return self.gps_data
@@ -651,6 +660,19 @@ with ui.card().classes('w-full q-pa-lg bg-grey-1'):
                                 compass_roll = ui.label('Roll: --').classes('font-mono text-subtitle1')
                                 compass_time = ui.label('Last Update: --').classes('font-mono text-subtitle1')
                                 
+                                # Add calibration status indicators
+                                ui.label('Calibration Status').classes('text-subtitle2 text-weight-medium q-mt-sm')
+                                with ui.row().classes('items-center justify-start gap-2'):
+                                    ui.label('System:').classes('text-caption')
+                                    system_cal_indicator = ui.linear_progress(value=0).classes('w-16')
+                                    ui.label('Gyro:').classes('text-caption')
+                                    gyro_cal_indicator = ui.linear_progress(value=0).classes('w-16')
+                                with ui.row().classes('items-center justify-start gap-2'):
+                                    ui.label('Accel:').classes('text-caption')
+                                    accel_cal_indicator = ui.linear_progress(value=0).classes('w-16')
+                                    ui.label('Mag:').classes('text-caption')
+                                    mag_cal_indicator = ui.linear_progress(value=0).classes('w-16')
+                                
                                 # Add route information
                                 route_distance = ui.label('Distance to next: --').classes('font-mono text-subtitle1')
                                 route_bearing = ui.label('Bearing to next: --').classes('font-mono text-subtitle1')
@@ -898,13 +920,32 @@ with ui.card().classes('w-full q-pa-lg bg-grey-1'):
                             compass_roll.set_text(f'Roll: {gps.compass_roll:.1f}°')
                             if gps.compass_last_update:
                                 compass_time.set_text(f'Last Update: {gps.compass_last_update.strftime("%H:%M:%S")}')
+                            
+                            # Update calibration status indicators (values are 0-3, convert to 0-1 for progress bars)
+                            system_cal_indicator.set_value(gps.compass_system_cal / 3.0)
+                            system_cal_indicator.classes(f'bg-{get_cal_color(gps.compass_system_cal)}')
+                            
+                            gyro_cal_indicator.set_value(gps.compass_gyro_cal / 3.0)
+                            gyro_cal_indicator.classes(f'bg-{get_cal_color(gps.compass_gyro_cal)}')
+                            
+                            accel_cal_indicator.set_value(gps.compass_accel_cal / 3.0)
+                            accel_cal_indicator.classes(f'bg-{get_cal_color(gps.compass_accel_cal)}')
+                            
+                            mag_cal_indicator.set_value(gps.compass_mag_cal / 3.0)
+                            mag_cal_indicator.classes(f'bg-{get_cal_color(gps.compass_mag_cal)}')
                         else:
                             compass_status.set_text('Compass: Not Ready')
                             compass_status.classes('text-negative')
                             compass_heading.set_text('Heading: --')
                             compass_pitch.set_text('Pitch: --')
                             compass_roll.set_text('Roll: --')
-                        
+                            
+                            # Reset calibration indicators
+                            system_cal_indicator.set_value(0)
+                            gyro_cal_indicator.set_value(0)
+                            accel_cal_indicator.set_value(0)
+                            mag_cal_indicator.set_value(0)
+
                         try:
                             if controller.serial.map_html:  # Check if map_html exists
                                 map_display.set_content(controller.serial.map_html)
@@ -954,6 +995,19 @@ with ui.card().classes('w-full q-pa-lg bg-grey-1'):
                             compass_roll.set_text(f'Roll: {gps.compass_roll:.1f}°')
                             if gps.compass_last_update:
                                 compass_time.set_text(f'Last Update: {gps.compass_last_update.strftime("%H:%M:%S")}')
+                            
+                            # Update calibration status indicators
+                            system_cal_indicator.set_value(gps.compass_system_cal / 3.0)
+                            system_cal_indicator.classes(f'bg-{get_cal_color(gps.compass_system_cal)}')
+                            
+                            gyro_cal_indicator.set_value(gps.compass_gyro_cal / 3.0)
+                            gyro_cal_indicator.classes(f'bg-{get_cal_color(gps.compass_gyro_cal)}')
+                            
+                            accel_cal_indicator.set_value(gps.compass_accel_cal / 3.0)
+                            accel_cal_indicator.classes(f'bg-{get_cal_color(gps.compass_accel_cal)}')
+                            
+                            mag_cal_indicator.set_value(gps.compass_mag_cal / 3.0)
+                            mag_cal_indicator.classes(f'bg-{get_cal_color(gps.compass_mag_cal)}')
                         else:
                             compass_status.set_text('Compass: Not Ready')
                             compass_status.classes('text-negative')
@@ -961,6 +1015,12 @@ with ui.card().classes('w-full q-pa-lg bg-grey-1'):
                             compass_pitch.set_text('Pitch: --')
                             compass_roll.set_text('Roll: --')
                             compass_time.set_text('Last Update: --')
+                            
+                            # Reset calibration indicators
+                            system_cal_indicator.set_value(0)
+                            gyro_cal_indicator.set_value(0)
+                            accel_cal_indicator.set_value(0)
+                            mag_cal_indicator.set_value(0)
                         
                         # Show "No GPS Fix" message with improved styling
                         map_display.set_content(
@@ -1008,6 +1068,18 @@ ui.timer(0.1, update_ui)
 @app.on_shutdown
 def shutdown():
     controller.stop_monitoring()
+
+# Add a helper function to get appropriate color based on calibration level
+def get_cal_color(cal_level):
+    """Return appropriate color class based on calibration level (0-3)"""
+    if cal_level == 0:
+        return 'negative'
+    elif cal_level == 1:
+        return 'warning'
+    elif cal_level == 2:
+        return 'info'
+    else:  # Level 3 (fully calibrated)
+        return 'positive'
 
 if __name__ in {"__main__", "__mp_main__"}:
     ui.run()
