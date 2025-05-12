@@ -8,6 +8,7 @@ A Python-based interface for controlling a robot with GPS navigation capabilitie
 - GPS navigation with waypoint support
 - Interactive map display with click-to-add waypoints
 - Route tracking and waypoint management
+- Return to Home functionality
 - Serial communication with Arduino controller
 - Support for multiple input devices
 
@@ -48,12 +49,30 @@ A Python-based interface for controlling a robot with GPS navigation capabilitie
 
 ## GPS Features
 
+### Position Tracking
 - Real-time GPS position tracking
 - Interactive map display
-- Click-to-add waypoints
-- Waypoint completion tracking
-- Route visualization
-- Distance and bearing calculations
+- Position history tracking
+
+### Waypoint Management
+- Click-to-add waypoints on the map
+- Waypoint table with name, coordinates, and status
+- Automatic waypoint completion when within range
+- Customizable completion radius
+
+### Return to Home (RTH)
+The Return to Home feature allows your robot to automatically navigate back to its starting position:
+
+- **How it works**: The system automatically saves the first valid GPS position after startup as the "home" location
+- **Activation**: Click the "Return to Home" button in the GPS section
+- **Behavior**: Creates a new waypoint at the home position that the robot can navigate to
+- **Requirements**: Requires a valid GPS fix on startup to set the home position
+
+### Route Navigation
+- Route visualization with lines between waypoints
+- Distance and bearing calculations to next waypoint
+- Route progress tracking
+- Current route highlighted on map
 
 ## License
 
