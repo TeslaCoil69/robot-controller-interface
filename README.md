@@ -10,6 +10,7 @@ A Python-based interface for controlling a robot with GPS navigation capabilitie
 - Route tracking and waypoint management
 - Return to Home functionality
 - Compass heading with BNO055 sensor
+- Autonomous waypoint navigation with autopilot
 - Serial communication with Arduino controller
 - Support for multiple input devices
 
@@ -21,6 +22,7 @@ A Python-based interface for controlling a robot with GPS navigation capabilitie
 - inputs
 - folium
 - asyncio
+- numpy
 
 ### Arduino Dependencies
 - AccelStepper
@@ -70,6 +72,18 @@ The Return to Home feature allows your robot to automatically navigate back to i
 - **Activation**: Click the "Return to Home" button in the GPS section
 - **Behavior**: Creates a new waypoint at the home position that the robot can navigate to
 - **Requirements**: Requires a valid GPS fix on startup to set the home position
+
+### Autopilot Navigation
+The autopilot feature provides autonomous navigation through waypoints:
+
+- **Waypoint Following**: Automatically navigate through a sequence of waypoints
+- **Pure Pursuit Algorithm**: Uses a sophisticated path-following algorithm with cross-track error correction
+- **Manual Override**: Temporarily take control by moving the right joystick, autopilot resumes after 5 seconds of inactivity
+- **Split Control**: Keep manual control of the camera gimbal (left joystick) while autopilot handles steering and throttle
+- **Speed Control**: Adjust the maximum speed of the autopilot with an intuitive slider
+- **Variable Speed**: Automatically reduces speed during sharp turns and when approaching waypoints
+- **Visual Feedback**: Real-time display of heading errors, cross-track errors, and steering commands
+- **One-Click Activation**: Enable/disable autopilot with a simple toggle switch
 
 ### Compass Navigation
 The BNO055 compass sensor provides accurate heading information for navigation:

@@ -14,6 +14,7 @@ import os
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 import math
+import numpy as np
 
 @dataclass
 class Waypoint:
@@ -76,6 +77,17 @@ class GPSData:
         self.compass_gyro_cal = 0
         self.compass_accel_cal = 0
         self.compass_mag_cal = 0
+        # Add autopilot data
+        self.autopilot_active = False
+        self.autopilot_target_heading = None
+        self.autopilot_cross_track_error = 0.0
+        self.autopilot_distance_to_waypoint = 0.0
+        self.autopilot_arrival_radius = 5.0  # meters, when we consider a waypoint "reached"
+        self.autopilot_lookahead_distance = 10.0  # meters, for pure pursuit algorithm
+        self.autopilot_last_target_point = None
+        self.autopilot_steering_angle = 0
+        self.autopilot_throttle = 0
+        self.autopilot_speed_limit = 70  # % of max throttle
 
     def update(self, lat, lon, alt, speed, sats, hdop):
         self.latitude = lat
@@ -183,6 +195,145 @@ class GPSData:
             self.waypoints.append(rth_wp)
             return rth_wp
         return None
+
+    def calculate_desired_heading(self, current_lat, current_lon):
+        """Calculate the desired heading to the next waypoint."""
+        next_wp = self.get_next_waypoint()
+        if not next_wp:
+            return None
+            
+        # Calculate bearing to waypoint
+        bearing = next_wp.bearing_to(current_lat, current_lon)
+        self.autopilot_target_heading = bearing
+        return bearing
+        
+    def calculate_cross_track_error(self, current_lat, current_lon):
+        """Calculate cross-track error (deviation from ideal path)."""
+        if len(self.waypoints) < 2 or not self.autopilot_active:
+            self.autopilot_cross_track_error = 0.0
+            return 0.0
+            
+        # Get current and next waypoint
+        next_wp = None
+        for i, wp in enumerate(self.waypoints):
+            if not wp.completed:
+                if i > 0:  # We have a previous waypoint to form a path
+                    prev_wp = self.waypoints[i-1]
+                    next_wp = wp
+                    break
+                else:
+                    # First waypoint, no previous path
+                    self.autopilot_cross_track_error = 0.0
+                    return 0.0
+        
+        if not next_wp:
+            self.autopilot_cross_track_error = 0.0
+            return 0.0
+            
+        # Simplified cross-track error calculation
+        # Convert coordinates to a local Cartesian system
+        EARTH_RADIUS = 6371000  # Earth radius in meters
+        
+        # Convert all coordinates to radians
+        lat1, lon1 = math.radians(prev_wp.latitude), math.radians(prev_wp.longitude)
+        lat2, lon2 = math.radians(next_wp.latitude), math.radians(next_wp.longitude)
+        lat3, lon3 = math.radians(current_lat), math.radians(current_lon)
+        
+        # Calculate the perpendicular distance to the great circle path
+        x1 = EARTH_RADIUS * math.cos(lat1) * math.cos(lon1)
+        y1 = EARTH_RADIUS * math.cos(lat1) * math.sin(lon1)
+        z1 = EARTH_RADIUS * math.sin(lat1)
+        
+        x2 = EARTH_RADIUS * math.cos(lat2) * math.cos(lon2)
+        y2 = EARTH_RADIUS * math.cos(lat2) * math.sin(lon2)
+        z2 = EARTH_RADIUS * math.sin(lat2)
+        
+        x3 = EARTH_RADIUS * math.cos(lat3) * math.cos(lon3)
+        y3 = EARTH_RADIUS * math.cos(lat3) * math.sin(lon3)
+        z3 = EARTH_RADIUS * math.sin(lat3)
+        
+        # Vector cross product to get perpendicular vector to path
+        cx = (y1*z2 - z1*y2)
+        cy = (z1*x2 - x1*z2)
+        cz = (x1*y2 - y1*x2)
+        
+        # Normalize
+        norm = math.sqrt(cx*cx + cy*cy + cz*cz)
+        if norm < 1e-10:  # Too small, avoid division by zero
+            self.autopilot_cross_track_error = 0.0
+            return 0.0
+            
+        cx, cy, cz = cx/norm, cy/norm, cz/norm
+        
+        # Dot product with current position to get distance
+        cross_track = abs(cx*x3 + cy*y3 + cz*z3)
+        
+        # Sign of the cross-track error (left or right of path)
+        # Use the determinant to determine which side
+        det = (x2-x1)*(y3-y1) - (y2-y1)*(x3-x1)
+        cross_track = cross_track if det > 0 else -cross_track
+        
+        self.autopilot_cross_track_error = cross_track
+        return cross_track
+    
+    def calculate_pure_pursuit_steering(self, current_lat, current_lon, current_heading):
+        """Calculate steering angle using pure pursuit algorithm."""
+        if not self.autopilot_active:
+            return 0
+            
+        next_wp = self.get_next_waypoint()
+        if not next_wp:
+            return 0
+            
+        # Calculate distance to waypoint
+        distance = next_wp.distance_to(current_lat, current_lon)
+        self.autopilot_distance_to_waypoint = distance
+        
+        # Check if we've reached the waypoint
+        if distance <= self.autopilot_arrival_radius:
+            next_wp.completed = True
+            self.active_waypoint_index = min(self.active_waypoint_index + 1, len(self.waypoints) - 1)
+            return 0
+            
+        # Calculate lookahead point along the path
+        target_lat, target_lon = next_wp.latitude, next_wp.longitude
+        
+        # Calculate heading error (difference between current heading and desired heading)
+        desired_heading = self.calculate_desired_heading(current_lat, current_lon)
+        if desired_heading is None:
+            return 0
+            
+        heading_error = desired_heading - current_heading
+        # Normalize to -180 to 180
+        heading_error = (heading_error + 180) % 360 - 180
+        
+        # Calculate cross-track error for path correction
+        cross_track_error = self.calculate_cross_track_error(current_lat, current_lon)
+        
+        # Proportional control for steering
+        # Combine heading error and cross-track error
+        kp_heading = 1.0
+        kp_cross_track = 0.01  # Gain for cross-track error (adjust based on testing)
+        
+        # Calculate steering angle (-100 to 100 for controller emulation)
+        steering_angle = kp_heading * heading_error + kp_cross_track * cross_track_error
+        
+        # Limit steering angle to valid range
+        steering_angle = max(-100, min(100, steering_angle))
+        
+        # Set the calculated steering angle
+        self.autopilot_steering_angle = int(steering_angle)
+        
+        # Calculate throttle based on distance and steering angle
+        # Reduce speed when turning sharply or close to waypoint
+        base_throttle = self.autopilot_speed_limit
+        turn_factor = 1.0 - (abs(steering_angle) / 100.0) * 0.5  # Reduce speed up to 50% when turning hard
+        distance_factor = min(1.0, distance / 20.0)  # Reduce speed when approaching waypoint
+        
+        throttle = base_throttle * turn_factor * distance_factor
+        self.autopilot_throttle = int(throttle)
+        
+        return steering_angle
 
 class SerialConnection:
     def __init__(self):
@@ -391,6 +542,10 @@ class ControllerMonitor:
             'ABS_Z': 0, 'ABS_RZ': 0,   # Triggers
         }
         self.lock = threading.Lock()
+        self.autopilot_override = False
+        # Add timeout for autopilot override
+        self.last_manual_control_time = time.time()
+        self.manual_control_timeout = 5.0  # seconds
 
     def scale_joystick(self, value):
         """Scale joystick value from -32768/32767 to -100/100 with deadzone"""
@@ -460,6 +615,53 @@ class ControllerMonitor:
             return
 
         # Format: LX,LY,RX,RY,LT,RT,A,B,X,Y,LB,RB,SELECT,START,DPAD_UP,DPAD_DOWN,DPAD_LEFT,DPAD_RIGHT
+        # Check if autopilot should override controls
+        gps = self.serial.gps_data
+        if gps and gps.autopilot_active and not self.autopilot_override:
+            # Override right stick X (steering) and right stick Y (throttle)
+            # Left stick (camera gimbal) remains user controlled
+            steering_angle = gps.autopilot_steering_angle
+            throttle = gps.autopilot_throttle
+            
+            # Check if user is trying to override autopilot
+            if abs(self.axis_states['ABS_RX']) > 20 or abs(self.axis_states['ABS_RY']) > 20:
+                # User is moving right stick, temporarily override autopilot
+                self.autopilot_override = True
+                self.last_manual_control_time = time.time()
+            else:
+                # Use autopilot values for right stick
+                data = [
+                    self.axis_states['ABS_X'],      # Left stick X - user controlled
+                    self.axis_states['ABS_Y'],      # Left stick Y - user controlled
+                    steering_angle,                 # Right stick X - autopilot steering
+                    -throttle,                      # Right stick Y - autopilot throttle (negative for forward)
+                    self.axis_states['ABS_Z'],      # Left trigger
+                    self.axis_states['ABS_RZ'],     # Right trigger
+                    self.button_states['BTN_SOUTH'], # A button
+                    self.button_states['BTN_EAST'],  # B button
+                    self.button_states['BTN_WEST'],  # X button
+                    self.button_states['BTN_NORTH'], # Y button
+                    self.button_states['BTN_TL'],    # Left bumper
+                    self.button_states['BTN_TR'],    # Right bumper
+                    self.button_states['BTN_SELECT'],# Select button
+                    self.button_states['BTN_START'], # Start button
+                    1 if self.button_states['ABS_HAT0Y'] == -1 else 0,  # D-pad Up
+                    1 if self.button_states['ABS_HAT0Y'] == 1 else 0,   # D-pad Down
+                    1 if self.button_states['ABS_HAT0X'] == -1 else 0,  # D-pad Left
+                    1 if self.button_states['ABS_HAT0X'] == 1 else 0    # D-pad Right
+                ]
+                
+                # Convert to comma-separated string and add newline
+                data_str = ','.join(map(str, data)) + '\n'
+                self.serial.write(data_str)
+                self.last_message = data_str.strip()  # Store last message without newline
+                return
+        else:
+            # Check if manual control timeout has expired
+            if self.autopilot_override and time.time() - self.last_manual_control_time > self.manual_control_timeout:
+                self.autopilot_override = False
+
+        # Normal control (no autopilot or user override active)
         data = [
             self.axis_states['ABS_X'],      # Left stick X
             self.axis_states['ABS_Y'],      # Left stick Y
@@ -727,6 +929,38 @@ with ui.card().classes('w-full q-pa-lg bg-grey-1'):
                                 row_key='name',
                                 pagination={'rowsPerPage': 5}
                             ).classes('w-full')
+
+        # Autopilot Section
+        with ui.card().classes('col-span-12 bg-white q-mb-lg'):
+            with ui.card().classes('q-pa-lg'):
+                with ui.row().classes('items-center justify-between q-mb-md'):
+                    with ui.row().classes('items-center gap-2'):
+                        ui.icon('auto_mode').classes('text-primary text-h4')
+                        ui.label('Autopilot').classes('text-h4 text-weight-bold text-primary')
+                    autopilot_status = ui.label('Autopilot: Disabled').classes('text-h6 text-negative q-pa-sm rounded')
+                
+                with ui.row().classes('q-mb-md gap-4'):
+                    autopilot_toggle = ui.switch('Enable Autopilot', on_change=lambda e: toggle_autopilot(e.value))
+                    ui.button('Follow Waypoints', icon='route', on_click=lambda: start_follow_waypoints()).classes('bg-primary text-white')
+                    ui.button('Stop Autopilot', icon='stop_circle', on_click=lambda: stop_autopilot()).classes('bg-negative text-white')
+                    
+                # Autopilot status display
+                with ui.card().classes('col-span-12 bg-grey-1 q-pa-md'):
+                    with ui.column().classes('gap-2'):
+                        ui.label('Autopilot Status').classes('text-subtitle1 text-weight-medium')
+                        autopilot_target = ui.label('Target Heading: --').classes('font-mono')
+                        autopilot_error = ui.label('Heading Error: --').classes('font-mono')
+                        autopilot_xte = ui.label('Cross Track Error: --').classes('font-mono')
+                        autopilot_distance = ui.label('Distance to Waypoint: --').classes('font-mono')
+                        autopilot_steering = ui.label('Steering Command: --').classes('font-mono')
+                        autopilot_throttle = ui.label('Throttle Command: --').classes('font-mono')
+                        
+                        with ui.row().classes('items-center gap-2 q-mt-sm'):
+                            ui.label('Manual Override:').classes('text-caption')
+                            override_indicator = ui.badge('INACTIVE', color='grey')
+                            ui.label('Speed Limit:').classes('text-caption q-ml-md')
+                            speed_limit = ui.slider(min=0, max=100, value=70, on_change=lambda e: set_autopilot_speed(e.value)).classes('w-32')
+                            speed_display = ui.label('70%').classes('text-caption w-14')
 
         # Left column - Analog inputs with visual indicators
         with ui.card().classes('col-span-4 bg-white'):
@@ -1080,6 +1314,111 @@ def get_cal_color(cal_level):
         return 'info'
     else:  # Level 3 (fully calibrated)
         return 'positive'
+
+# Add autopilot functions
+def toggle_autopilot(value):
+    """Toggle autopilot mode on/off."""
+    controller.serial.gps_data.autopilot_active = value
+    if value:
+        autopilot_status.set_text('Autopilot: Enabled')
+        autopilot_status.classes('text-h6 text-positive q-pa-sm rounded')
+        ui.notify('Autopilot enabled', type='positive')
+    else:
+        autopilot_status.set_text('Autopilot: Disabled')
+        autopilot_status.classes('text-h6 text-negative q-pa-sm rounded')
+        ui.notify('Autopilot disabled', type='warning')
+        # Reset override state
+        controller.autopilot_override = False
+
+def start_follow_waypoints():
+    """Start following waypoints with autopilot."""
+    gps = controller.serial.gps_data
+    if not gps.waypoints:
+        ui.notify('No waypoints to follow', type='warning')
+        return
+        
+    # Reset completion status of waypoints
+    for wp in gps.waypoints:
+        wp.completed = False
+    gps.active_waypoint_index = 0
+    
+    # Enable autopilot
+    gps.autopilot_active = True
+    autopilot_toggle.set_value(True)
+    autopilot_status.set_text('Autopilot: Following Waypoints')
+    autopilot_status.classes('text-h6 text-positive q-pa-sm rounded')
+    ui.notify('Autopilot following waypoints', type='positive')
+
+def stop_autopilot():
+    """Stop autopilot and return to manual control."""
+    controller.serial.gps_data.autopilot_active = False
+    autopilot_toggle.set_value(False)
+    autopilot_status.set_text('Autopilot: Disabled')
+    autopilot_status.classes('text-h6 text-negative q-pa-sm rounded')
+    ui.notify('Autopilot stopped', type='warning')
+    # Reset override state
+    controller.autopilot_override = False
+
+def set_autopilot_speed(value):
+    """Set the autopilot speed limit."""
+    controller.serial.gps_data.autopilot_speed_limit = value
+    speed_display.set_text(f"{value}%")
+
+# Update the UI update timer to also update autopilot calculations
+def update_autopilot():
+    """Update autopilot calculations and UI."""
+    gps = controller.serial.gps_data
+    if not gps or not gps.compass_ready or not gps.has_fix:
+        return
+        
+    if gps.autopilot_active:
+        # Calculate steering commands
+        current_heading = gps.compass_heading if gps.compass_heading is not None else 0
+        steering = gps.calculate_pure_pursuit_steering(gps.latitude, gps.longitude, current_heading)
+        
+        # Update UI
+        if gps.autopilot_target_heading is not None:
+            autopilot_target.set_text(f"Target Heading: {gps.autopilot_target_heading:.1f}°")
+            
+            # Calculate heading error
+            heading_error = gps.autopilot_target_heading - current_heading
+            # Normalize to -180 to 180
+            heading_error = (heading_error + 180) % 360 - 180
+            autopilot_error.set_text(f"Heading Error: {heading_error:.1f}°")
+        else:
+            autopilot_target.set_text("Target Heading: --")
+            autopilot_error.set_text("Heading Error: --")
+            
+        # Update cross-track error
+        autopilot_xte.set_text(f"Cross Track Error: {gps.autopilot_cross_track_error:.1f}m")
+        
+        # Update distance to waypoint
+        autopilot_distance.set_text(f"Distance to Waypoint: {gps.autopilot_distance_to_waypoint:.1f}m")
+        
+        # Update steering and throttle commands
+        autopilot_steering.set_text(f"Steering Command: {gps.autopilot_steering_angle}")
+        autopilot_throttle.set_text(f"Throttle Command: {gps.autopilot_throttle}")
+        
+        # Update override indicator
+        if controller.autopilot_override:
+            override_indicator.set_text("ACTIVE")
+            override_indicator.props(f"color=warning")
+        else:
+            override_indicator.set_text("INACTIVE")
+            override_indicator.props(f"color=grey")
+    else:
+        # Reset displays when not active
+        autopilot_target.set_text("Target Heading: --")
+        autopilot_error.set_text("Heading Error: --")
+        autopilot_xte.set_text("Cross Track Error: --")
+        autopilot_distance.set_text("Distance to Waypoint: --")
+        autopilot_steering.set_text("Steering Command: --")
+        autopilot_throttle.set_text("Throttle Command: --")
+        override_indicator.set_text("INACTIVE")
+        override_indicator.props(f"color=grey")
+
+# Add autopilot update timer
+ui.timer(0.2, update_autopilot)  # Update autopilot calculations 5 times per second
 
 if __name__ in {"__main__", "__mp_main__"}:
     ui.run()
