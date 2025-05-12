@@ -3,6 +3,7 @@
 #include <Wire.h>
 #include <Adafruit_ADXL345_U.h>
 #include <TinyGPS++.h>
+#include <Adafruit_BNO08x.h>
 
 // Controller Data Receiver
 // Receives data from RYL890 module on Serial1 and forwards to computer over Serial
@@ -23,6 +24,9 @@ void disarmMotors();
 void resetMotors();
 void updateGPS();
 void reportGPS();
+void setupCompass();
+void updateCompass();
+void reportCompass();
 
 // Stepper motor pins for Arduino Mega
 #define X_STEP_PIN 22    // Digital pin 22 for X stepper step
@@ -61,6 +65,17 @@ float currentRoll = 0.0;   // Current roll angle (degrees)
 #define STABILIZATION_THRESHOLD 0.5  // Minimum angle to correct (degrees)
 #define JOYSTICK_DEADZONE 5      // Deadzone for joystick input (-5 to 5)
 #define STABILIZATION_DEADZONE 0.2  // Deadzone for stabilization (degrees)
+
+// BNO085 Compass settings
+#define BNO08X_RESET -1  // Reset pin for BNO085, -1 if not connected
+Adafruit_BNO08x bno08x(BNO08X_RESET);
+sh2_SensorValue_t sensorValue;
+float compass_heading = 0.0;  // Heading in degrees (0-360)
+float compass_pitch = 0.0;    // Pitch in degrees (-90 to 90)
+float compass_roll = 0.0;     // Roll in degrees (-180 to 180)
+bool compass_ready = false;   // Whether compass is initialized
+unsigned long lastCompassTime = 0;  // Last time compass data was reported
+#define COMPASS_REPORT_INTERVAL 500  // Report compass data every 500ms
 
 // Create stepper motor instances
 AccelStepper stepperX(AccelStepper::DRIVER, X_STEP_PIN, X_DIR_PIN);
@@ -123,7 +138,7 @@ void setup() {
   Serial2.begin(GPS_BAUD); // Serial2 for GPS module
   inputString.reserve(200);  // Reserve 200 bytes for the input string
   
-  // Initialize I2C for ADXL345
+  // Initialize I2C for sensors
   Wire.begin();
   
   // Initialize accelerometer
@@ -135,6 +150,9 @@ void setup() {
   // Set accelerometer range and data rate
   accel.setRange(ADXL345_RANGE_2_G);
   accel.setDataRate(ADXL345_DATARATE_100_HZ);
+  
+  // Initialize BNO085 compass
+  setupCompass();
   
   // Initialize status LED
   pinMode(STATUS_LED_PIN, OUTPUT);
@@ -163,6 +181,29 @@ void setup() {
   
   // Calibrate accelerometer
   calibrateAccelerometer();
+}
+
+void setupCompass() {
+  if (!bno08x.begin_I2C()) {
+    Serial.println("Failed to find BNO085 compass!");
+    compass_ready = false;
+  } else {
+    Serial.println("BNO085 compass initialized successfully!");
+    
+    // Enable the rotation vector report for orientation data
+    if (!bno08x.enableReport(SH2_ROTATION_VECTOR, 50000)) {
+      Serial.println("Could not enable rotation vector");
+      compass_ready = false;
+    } else {
+      compass_ready = true;
+    }
+    
+    // Also enable the game rotation vector for faster response
+    bno08x.enableReport(SH2_GAME_ROTATION_VECTOR, 50000);
+    
+    // Initialize lastCompassTime
+    lastCompassTime = millis();
+  }
 }
 
 void setupSteppers() {
@@ -216,6 +257,17 @@ void loop() {
     // Only update positions if armed
     updateGimbal();
     updateServos();
+  }
+  
+  // Update compass data
+  if (compass_ready) {
+    updateCompass();
+    
+    // Report compass data periodically
+    if (millis() - lastCompassTime >= COMPASS_REPORT_INTERVAL) {
+      reportCompass();
+      lastCompassTime = millis();
+    }
   }
   
   // Update GPS data
@@ -527,4 +579,121 @@ void reportGPS() {
     // Report GPS status if no fix
     Serial.println("GPS,NO_FIX");
   }
+}
+
+void updateCompass() {
+  if (bno08x.wasReset()) {
+    Serial.println("BNO085 was reset, reinitializing...");
+    setupCompass();
+    return;
+  }
+  
+  if (compass_ready && bno08x.getSensorEvent(&sensorValue)) {
+    switch (sensorValue.sensorId) {
+      case SH2_ROTATION_VECTOR:
+        // Convert quaternion to Euler angles
+        quaternionToEulerRV(&sensorValue.un.rotationVector);
+        break;
+      case SH2_GAME_ROTATION_VECTOR:
+        // Use game rotation vector as a backup
+        quaternionToEulerGRV(&sensorValue.un.gameRotationVector);
+        break;
+    }
+  }
+}
+
+void quaternionToEulerRV(sh2_RotationVectorWAcc_t* rotVector) {
+  // Convert quaternion to heading, roll, and pitch
+  float qr = rotVector->real;
+  float qi = rotVector->i;
+  float qj = rotVector->j;
+  float qk = rotVector->k;
+  
+  // Calculate heading (yaw)
+  float sqx = qi * qi;
+  float sqy = qj * qj;
+  float sqz = qk * qk;
+  float sqw = qr * qr;
+  
+  float unit = sqx + sqy + sqz + sqw;
+  float test = qi * qj + qk * qr;
+  
+  if (test > 0.499 * unit) {
+    // North pole singularity
+    compass_heading = 2 * atan2(qi, qr) * 180.0 / PI;
+    compass_pitch = 90;
+    compass_roll = 0;
+    return;
+  }
+  
+  if (test < -0.499 * unit) {
+    // South pole singularity
+    compass_heading = -2 * atan2(qi, qr) * 180.0 / PI;
+    compass_pitch = -90;
+    compass_roll = 0;
+    return;
+  }
+  
+  compass_heading = atan2(2.0 * (qj * qr - qi * qk), 1.0 - 2.0 * (sqy + sqz)) * 180.0 / PI;
+  compass_pitch = asin(2.0 * (qi * qj + qk * qr) / unit) * 180.0 / PI;
+  compass_roll = atan2(2.0 * (qi * qr - qj * qk), 1.0 - 2.0 * (sqx + sqz)) * 180.0 / PI;
+  
+  // Convert heading to 0-360
+  if (compass_heading < 0) compass_heading += 360.0;
+}
+
+void quaternionToEulerGRV(sh2_RotationVector_t* rotVector) {
+  // Similar conversion but for game rotation vector
+  float qr = rotVector->real;
+  float qi = rotVector->i;
+  float qj = rotVector->j;
+  float qk = rotVector->k;
+  
+  // Calculate heading (yaw)
+  float sqx = qi * qi;
+  float sqy = qj * qj;
+  float sqz = qk * qk;
+  float sqw = qr * qr;
+  
+  float unit = sqx + sqy + sqz + sqw;
+  float test = qi * qj + qk * qr;
+  
+  if (test > 0.499 * unit) {
+    // North pole singularity
+    compass_heading = 2 * atan2(qi, qr) * 180.0 / PI;
+    compass_pitch = 90;
+    compass_roll = 0;
+    return;
+  }
+  
+  if (test < -0.499 * unit) {
+    // South pole singularity
+    compass_heading = -2 * atan2(qi, qr) * 180.0 / PI;
+    compass_pitch = -90;
+    compass_roll = 0;
+    return;
+  }
+  
+  compass_heading = atan2(2.0 * (qj * qr - qi * qk), 1.0 - 2.0 * (sqy + sqz)) * 180.0 / PI;
+  compass_pitch = asin(2.0 * (qi * qj + qk * qr) / unit) * 180.0 / PI;
+  compass_roll = atan2(2.0 * (qi * qr - qj * qk), 1.0 - 2.0 * (sqx + sqz)) * 180.0 / PI;
+  
+  // Convert heading to 0-360
+  if (compass_heading < 0) compass_heading += 360.0;
+}
+
+void reportCompass() {
+  if (!compass_ready) {
+    Serial.println("COMPASS,NOT_READY");
+    return;
+  }
+  
+  // Format: COMPASS,heading,pitch,roll
+  Serial.print("COMPASS,");
+  Serial.print(compass_heading, 1);  // Heading with 1 decimal place
+  Serial.print(",");
+  Serial.print(compass_pitch, 1);    // Pitch with 1 decimal place
+  Serial.print(",");
+  Serial.print(compass_roll, 1);     // Roll with 1 decimal place
+  Serial.println();
 }

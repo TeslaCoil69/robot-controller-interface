@@ -65,6 +65,12 @@ class GPSData:
         self.active_waypoint_index = 0
         self.home_position = None  # (lat, lon)
         self.home_set = False
+        # Add compass data
+        self.compass_heading = None
+        self.compass_pitch = None
+        self.compass_roll = None
+        self.compass_ready = False
+        self.compass_last_update = None
 
     def update(self, lat, lon, alt, speed, sats, hdop):
         self.latitude = lat
@@ -217,8 +223,8 @@ class SerialConnection:
                 print(f"Failed to write to serial port: {e}")
                 self.connected = False
 
-    def read_gps_data(self):
-        """Read and parse GPS data from serial port"""
+    def read_serial_data(self):
+        """Read and parse data from serial port (GPS and compass)"""
         if not self.connected or not self.serial or not self.serial.is_open:
             return None
 
@@ -226,6 +232,7 @@ class SerialConnection:
             if self.serial.in_waiting:
                 line = self.serial.readline().decode('utf-8').strip()
                 if line.startswith('GPS,'):
+                    # Handle GPS data
                     parts = line.split(',')
                     if len(parts) == 7 and parts[1] != 'NO_FIX':
                         try:
@@ -244,8 +251,24 @@ class SerialConnection:
                     elif len(parts) == 2 and parts[1] == 'NO_FIX':
                         self.gps_data.no_fix()
                         return self.gps_data
+                elif line.startswith('COMPASS,'):
+                    # Handle compass data
+                    parts = line.split(',')
+                    if len(parts) == 4 and parts[1] != 'NOT_READY':
+                        try:
+                            self.gps_data.compass_heading = float(parts[1])
+                            self.gps_data.compass_pitch = float(parts[2])
+                            self.gps_data.compass_roll = float(parts[3])
+                            self.gps_data.compass_ready = True
+                            self.gps_data.compass_last_update = datetime.now()
+                            return self.gps_data
+                        except (ValueError, IndexError) as e:
+                            print(f"Error parsing compass data: {e}")
+                    elif len(parts) == 2 and parts[1] == 'NOT_READY':
+                        self.gps_data.compass_ready = False
+                        return self.gps_data
         except Exception as e:
-            print(f"Error reading GPS data: {e}")
+            print(f"Error reading serial data: {e}")
             self.connected = False
         return None
 
@@ -619,6 +642,15 @@ with ui.card().classes('w-full q-pa-lg bg-grey-1'):
                                 gps_hdop = ui.label('HDOP: --').classes('font-mono text-subtitle1')
                                 gps_time = ui.label('Last Update: --').classes('font-mono text-subtitle1')
                                 
+                                # Add compass information
+                                ui.separator()
+                                ui.label('Compass Data').classes('text-subtitle1 text-weight-medium')
+                                compass_status = ui.label('Compass: --').classes('font-mono text-subtitle1')
+                                compass_heading = ui.label('Heading: --').classes('font-mono text-subtitle1')
+                                compass_pitch = ui.label('Pitch: --').classes('font-mono text-subtitle1')
+                                compass_roll = ui.label('Roll: --').classes('font-mono text-subtitle1')
+                                compass_time = ui.label('Last Update: --').classes('font-mono text-subtitle1')
+                                
                                 # Add route information
                                 route_distance = ui.label('Distance to next: --').classes('font-mono text-subtitle1')
                                 route_bearing = ui.label('Bearing to next: --').classes('font-mono text-subtitle1')
@@ -835,8 +867,8 @@ with ui.card().classes('w-full q-pa-lg bg-grey-1'):
                             gps_alt = ui.label('Altitude: --').classes('font-mono')
                             gps_speed = ui.label('Speed: --').classes('font-mono')
                             gps_sats = ui.label('Satellites: --').classes('font-mono')
-                            gps_hdop = ui.label('HDOP: --').classes('font-mono')
-                            gps_time = ui.label('Last Update: --').classes('font-mono')
+                            gps_hdop = ui.label('HDOP: --').classes('font-mono text-subtitle1')
+                            gps_time = ui.label('Last Update: --').classes('font-mono text-subtitle1')
 
                     with ui.card().classes('col-span-1 bg-grey-1'):
                         ui.label('Map').classes('text-subtitle1 text-weight-medium')
@@ -856,6 +888,22 @@ with ui.card().classes('w-full q-pa-lg bg-grey-1'):
                         gps_hdop.set_text(f'HDOP: {gps.hdop:.1f}')
                         if gps.last_update:
                             gps_time.set_text(f'Last Update: {gps.last_update.strftime("%H:%M:%S")}')
+                        
+                        # Update compass data if available
+                        if gps.compass_ready:
+                            compass_status.set_text('Compass: Active')
+                            compass_status.classes('text-positive')
+                            compass_heading.set_text(f'Heading: {gps.compass_heading:.1f}°')
+                            compass_pitch.set_text(f'Pitch: {gps.compass_pitch:.1f}°')
+                            compass_roll.set_text(f'Roll: {gps.compass_roll:.1f}°')
+                            if gps.compass_last_update:
+                                compass_time.set_text(f'Last Update: {gps.compass_last_update.strftime("%H:%M:%S")}')
+                        else:
+                            compass_status.set_text('Compass: Not Ready')
+                            compass_status.classes('text-negative')
+                            compass_heading.set_text('Heading: --')
+                            compass_pitch.set_text('Pitch: --')
+                            compass_roll.set_text('Roll: --')
                         
                         try:
                             if controller.serial.map_html:  # Check if map_html exists
@@ -897,6 +945,23 @@ with ui.card().classes('w-full q-pa-lg bg-grey-1'):
                         else:
                             gps_time.set_text('Last Update: --')
                         
+                        # Also update compass section even if no GPS fix
+                        if gps and gps.compass_ready:
+                            compass_status.set_text('Compass: Active')
+                            compass_status.classes('text-positive')
+                            compass_heading.set_text(f'Heading: {gps.compass_heading:.1f}°')
+                            compass_pitch.set_text(f'Pitch: {gps.compass_pitch:.1f}°')
+                            compass_roll.set_text(f'Roll: {gps.compass_roll:.1f}°')
+                            if gps.compass_last_update:
+                                compass_time.set_text(f'Last Update: {gps.compass_last_update.strftime("%H:%M:%S")}')
+                        else:
+                            compass_status.set_text('Compass: Not Ready')
+                            compass_status.classes('text-negative')
+                            compass_heading.set_text('Heading: --')
+                            compass_pitch.set_text('Pitch: --')
+                            compass_roll.set_text('Roll: --')
+                            compass_time.set_text('Last Update: --')
+                        
                         # Show "No GPS Fix" message with improved styling
                         map_display.set_content(
                             '<div style="display: flex; flex-direction: column; justify-content: center; align-items: center; '
@@ -915,7 +980,7 @@ with ui.card().classes('w-full q-pa-lg bg-grey-1'):
 
                 # Update GPS data reading every 100ms
                 def read_gps():
-                    controller.serial.read_gps_data()
+                    controller.serial.read_serial_data()
                 ui.timer(0.1, read_gps)
 
 def return_to_home():
