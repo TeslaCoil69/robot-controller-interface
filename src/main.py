@@ -63,6 +63,8 @@ class GPSData:
         self.next_waypoint_id = 1
         self.completion_radius = 5.0  # meters
         self.active_waypoint_index = 0
+        self.home_position = None  # (lat, lon)
+        self.home_set = False
 
     def update(self, lat, lon, alt, speed, sats, hdop):
         self.latitude = lat
@@ -78,6 +80,10 @@ class GPSData:
             'lon': lon,
             'time': self.last_update.strftime('%H:%M:%S')
         })
+        # Set home position if not already set
+        if not self.home_set:
+            self.home_position = (lat, lon)
+            self.home_set = True
         # Check for waypoint completion
         self.check_waypoint_completion(lat, lon)
 
@@ -143,6 +149,29 @@ class GPSData:
         progress = (completed / total) * 100 if total > 0 else 0
 
         return distance, bearing, progress
+
+    def set_home(self, lat, lon):
+        self.home_position = (lat, lon)
+        self.home_set = True
+
+    def get_home(self):
+        return self.home_position
+
+    def trigger_return_to_home(self):
+        """Add a temporary waypoint at the home position if set."""
+        if self.home_set and self.home_position:
+            lat, lon = self.home_position
+            # Add a special RTH waypoint
+            rth_wp = Waypoint(
+                latitude=lat,
+                longitude=lon,
+                name="RTH",
+                timestamp=datetime.now(),
+                description="Return to Home (auto-added)"
+            )
+            self.waypoints.append(rth_wp)
+            return rth_wp
+        return None
 
 class SerialConnection:
     def __init__(self):
@@ -572,6 +601,8 @@ with ui.card().classes('w-full q-pa-lg bg-grey-1'):
                         ui.icon('gps_fixed').classes('text-primary text-h4')
                         ui.label('GPS Navigation').classes('text-h4 text-weight-bold text-primary')
                     gps_status = ui.label('No GPS Fix').classes('text-h6 text-negative q-pa-sm rounded')
+                    with ui.row().classes('items-center gap-2 q-mb-md'):
+                        ui.button('Return to Home', icon='home', on_click=lambda: return_to_home()).classes('bg-primary text-white')
                 
                 # GPS Status Display with improved layout
                 with ui.grid(columns=12).classes('gap-4'):
@@ -886,6 +917,18 @@ with ui.card().classes('w-full q-pa-lg bg-grey-1'):
                 def read_gps():
                     controller.serial.read_gps_data()
                 ui.timer(0.1, read_gps)
+
+def return_to_home():
+    gps = controller.serial.gps_data
+    if gps.home_set and gps.home_position:
+        wp = gps.trigger_return_to_home()
+        if wp:
+            controller.serial.update_map()
+            ui.notify('Return to Home waypoint added!', type='positive')
+        else:
+            ui.notify('Home position not set.', type='warning')
+    else:
+        ui.notify('No home position available yet. Wait for GPS fix.', type='warning')
 
 async def update_ui():
     while True:
